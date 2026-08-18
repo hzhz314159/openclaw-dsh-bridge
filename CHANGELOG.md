@@ -1,7 +1,42 @@
 # Changelog
 
-本项目为 DSH（DeepSeek Harness）插件：微信 / 飞书 / QQ 三通道 → DSH 会话统一 IM 桥。
+本项目为 DSH（DeepSeek Harness）插件：微信 / 飞书 → DSH 会话统一 IM 桥
+（QQ 自 v0.8.0 起由官方 @tencent-connect/dsh-qqbot 提供）。
 版本号遵循语义化版本；每次发布附测试状态（单元断言数由 `scripts/test.ps1` 输出）。
+
+## [0.8.0] — 2026-08（QQ 移交官方插件）
+
+> 按用户要求以官方 https://github.com/tencent-connect/dsh-qqbot 替换本插件的自研 QQ 实现。
+> 移除 ~600 行手写 QQ 开放平台协议（lib/channels/qq.js），QQ 改由官方独立插件接管。
+
+### 变更
+- **删除自研 QQ 通道** `lib/channels/qq.js`（token/WS 网关/事件归一化/发送），
+  并移除 `index.js` 中整段 QQ onMessage 管道与 `qcBinds`/`qqGate`/`qqLogger`；
+- **设置 schema 移除 QQ 凭据键**：`qqBotAppId` / `qqBotToken` / `qqSandbox`，
+  以及不再被消费的 `enableQq` / `whitelistQq` 白名单键；旧 settings.yaml 里的残留
+  值不再读取（可留在文件中不清理）；
+- **注册表与路由占位**：`CHANNEL_TABLE.qq` 改为 `implemented:false` +
+  `eta:"由官方 @tencent-connect/dsh-qqbot 提供"`；`/channels/qq/status` 返回
+  `{implemented:false, state:"external"}` 与官方插件安装指引（不再 404 / 不再建连）；
+- **客户端 QQ 卡**：`lib/client.js` 的 CHANNELS 表 QQ 项置 `implemented:false`，
+  渲染为「由官方 @tencent-connect/dsh-qqbot 提供」说明卡（不再渲染凭据/沙箱/连接按钮）；
+- **IM 会话映射前缀收敛**：`IM_KEY_RE` 由 `^(wx|feishu|qq)-` 收窄为 `^(wx|feishu)-`
+  （QQ 不再经本插件产生 agent 会话）；
+- 已知渠道但未由本插件实现时，`handleChannels` 返回 200 external 状态
+  （未知渠道仍 404）。
+
+### 部署（官方插件）
+- 安装：`npx @deepseek-ai/dsh plugin add @tencent-connect/dsh-qqbot`
+  （或作为官方 bundle 加入 `dsh.profile.bundles`，其自带 `dsh.bundle.patch` 属合法 bundle）；
+- 凭据：环境变量 `QQBOT_APPID` / `QQBOT_SECRET`，或首次运行终端扫码绑定；
+- 依赖闭环：官方包需 `@tencent-connect/{dsh-qqbot,qqbot-connector,qqbot-nodejs}`、
+  `js-yaml`、`qrcode-terminal`，peerDeps `@deepseek-ai/{cordis,dsh-agent,dsh-llm,
+  dsh-session,schemastery}`（后列可 junction 到 DSH 核心 node_modules）。
+
+### 验证
+- **138 项断言全过**：微信/飞书/共享层/协议断言全部保留；自研 QQ 协议与归一化
+  断言已移除，新增 4 项「外部托管占位」断言（注册表 implemented=false + eta 指引、
+  /channels/qq/status 返回 external 状态、注册表仍含三渠道行）。
 
 ## [0.7.2] — 2026-08（代码审查修复轮）
 
