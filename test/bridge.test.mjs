@@ -67,7 +67,7 @@ const mockIlink = createServer((req, res) => {
 });
 await new Promise((resolve) => mockIlink.listen(65411, "127.0.0.1", resolve));
 
-// 必须在导入插件前设置，wechat.js/feishu.js/qq.js 在模块加载时读取这些环境变量
+// 必须在导入插件前设置，wechat.js/feishu.js 在模块加载时读取这些环境变量
 process.env.OPENCLAW_BRIDGE_ILINK_BASE = "http://127.0.0.1:65411";
 process.env.OPENCLAW_BRIDGE_FEISHU_BASE = "http://127.0.0.1:65414";
 process.env.OPENCLAW_BRIDGE_QQ_BASE = "http://127.0.0.1:65416";
@@ -1014,7 +1014,7 @@ ok(Array.isArray(inject) && inject.includes("agents"), "inject 含 agents 服务
   const qq = data.channels.find((c) => c.id === "qq");
   ok(wx && wx.implemented === true && wx.enabled === true, "微信 implemented 且默认启用");
   ok(fs && fs.implemented === true && fs.enabled === true, "飞书已实现且默认启用");
-  ok(qq && qq.implemented === true && qq.enabled === true, "QQ 已实现且默认启用");
+  ok(qq && qq.implemented === false && qq.enabled === false && /dsh-qqbot/.test(qq.eta || ""), "QQ 不由本插件实现（v0.8.0 起由官方 @tencent-connect/dsh-qqbot 提供）");
 
   const res2 = fakeRes();
   await routes.get("/openclaw-bridge/channels/")(fakeReq("POST", "/openclaw-bridge/channels/telegram/login", { body: "{}" }), res2);
@@ -1184,98 +1184,24 @@ ok(Array.isArray(inject) && inject.includes("agents"), "inject 含 agents 服务
   mockSettingsValue = { ...mockSettingsValue, feishuAppId: "", feishuAppSecret: "" };
 }
 
-// 21) QQ 开放平台机器人渠道（P2，SPEC §7 / docs/qq-bot-dsh-report.md）
+// 21) QQ：v0.8.0 起不再自研实现，交由官方 @tencent-connect/dsh-qqbot 独立插件（注册表/路由占位）
 {
-  const qqMod = await import("@deepseek-ai/dsh-openclaw-bridge/lib/channels/qq.js");
-  const { normalizeQqEvent, createQqAdapter } = qqMod;
-
-  // 归一化：4 类事件 + <@bot> 清洗 + null 分支
-  const g = normalizeQqEvent({ t: "GROUP_AT_MESSAGE_CREATE", d: { id: "gid1", group_openid: "G1", content: "<@!qqbot1> 大家好", timestamp: 1000, author: { user_openid: "U1" }, mentions: [] } });
-  ok(g && g.channel === "qq" && g.conv.kind === "group" && g.conv.id === "G1" && g.conv.memberId === "U1" && g.text === "大家好" && g.msgId === "gid1", "群@事件归一化 + <@bot> 清洗");
-  const c = normalizeQqEvent({ t: "C2C_MESSAGE_CREATE", d: { id: "cid1", user_openid: "U2", content: "在吗", timestamp: 2000, author: { user_openid: "U2" } } });
-  ok(c && c.conv.kind === "p2p" && c.conv.id === "U2" && c.conv.memberId === "U2", "C2C 私聊归一化");
-  const a = normalizeQqEvent({ t: "AT_MESSAGE_CREATE", d: { id: "aid1", channel_id: "CH1", guild_id: "GU1", content: "hi <@bot>", author: { id: "UA1", username: "某人" } } });
-  ok(a && a.conv.kind === "group" && a.conv.id === "CH1" && a.conv.member.name === "某人", "频道@按频道会话（群视）");
-  const di = normalizeQqEvent({ t: "DIRECT_MESSAGE_CREATE", d: { id: "did1", src_guild_id: "GU2", channel_id: "CH2", content: "私信", author: { id: "UA2" } } });
-  ok(di && di.conv.kind === "p2p" && di.conv.id === "GU2", "频道私信按来源频道");
-  ok(normalizeQqEvent({ t: "GROUP_AT_MESSAGE_CREATE", d: { id: "x", content: "" } }) === null, "空文本 → null");
-  ok(normalizeQqEvent({ t: "GUILD_MEMBER_ADD" }) === null, "非目标事件 → null");
-
-  // 凭据校验
-  const qqAdapter = createQqAdapter({
-    getConfig: () => ({ appId: "qq_test_app", appSecret: "qq_test_secret", qqSandbox: "1" }),
-    onState: () => {},
-    onMessage: () => {},
-  });
-  const vOk = await qqAdapter.validate();
-  ok(vOk.ok === true, "QQ 凭据校验通过（有效 AppID/Token）");
-  const vBad = await qqAdapter.validate({ appId: "qq_test_app", appSecret: "bad" });
-  ok(vBad.ok === false, "QQ 凭据校验拒绝错误 Token");
-  ok(qqAdapter.status().sandbox === true, "缺省沙箱模式（qqSandbox 非 '0'）");
-
-  // 连接：gateway → identify → READY → heartbeat
-  const qqStates = [];
-  const qqMsgs = [];
-  const qqLog = { info() {}, warn() {}, error() {} };
-  const qq2 = createQqAdapter({
-    getConfig: () => ({ appId: "qq_test_app", appSecret: "qq_test_secret", qqSandbox: "1" }),
-    logger: qqLog,
-    onState: (s) => qqStates.push(s),
-    onMessage: (m) => qqMsgs.push(m),
-  });
-  await qq2.start();
-  ok(qq2.status().state === "connected", "QQ 网关连接进入 connected");
-  const gwCall = qqHttpCalls.find((x) => x.pathname === "/gateway/bot");
-  ok(gwCall && /^QQBot qq-at-mock$/.test(gwCall.headers.authorization || ""), "gateway 调用带 QQBot Bearer");
-  await waitFor(() => qqClientFrames.some((f) => f.op === 2));
-  const idf = qqClientFrames.find((f) => f.op === 2);
-  ok(
-    idf && idf.d.token === "QQBot qq-at-mock" && idf.d.intents === (1 << 25 | 1 << 30) && idf.d.shard && idf.d.shard[0] === 0,
-    "identify 帧：QQBot token + intents((1<<25)|(1<<30)) + shard[0,1]"
-  );
-  await waitFor(() => qqClientFrames.some((f) => f.op === 1), 6000);
-  ok(qqClientFrames.some((f) => f.op === 1), "HELLO 后按 heartbeat_interval 发送心跳");
-
-  // 事件上送
-  pushQqEvent("GROUP_AT_MESSAGE_CREATE", { id: "qqev1", group_openid: "G1", content: "<@!qqbot1> 群事件测试", timestamp: Date.now(), author: { user_openid: "U1" }, mentions: [] });
-  await waitFor(() => qqMsgs.some((m) => m.eventId === "qqev1"));
-  const qm = qqMsgs.find((m) => m.eventId === "qqev1");
-  ok(qm && qm.text === "群事件测试" && qm.conv.id === "G1" && qm.conv.kind === "group", "群@事件经网关上送并清洗");
-
-  // 发送：群聊（带 msg_id 被动回复）/ 私聊
-  const s1 = await qq2.send({ kind: "group", id: "G1" }, "群回复", { msgId: "qqev1" });
-  ok(s1.ok === true, "QQ 群聊发送成功");
-  const gc = qqHttpCalls.filter((x) => x.pathname === "/v2/groups/G1/messages").pop();
-  ok(gc && gc.body.content === "群回复" && gc.body.msg_type === 0 && gc.body.msg_id === "qqev1", "群聊发送体（content/msg_type:0/msg_id）");
-  const s2 = await qq2.send({ kind: "p2p", id: "U2" }, "私聊回复");
-  ok(s2.ok === true && qqHttpCalls.some((x) => x.pathname === "/v2/users/U2/messages"), "QQ 私聊发送成功（/v2/users）");
-  const s3 = await qq2.send({ kind: "group", id: "G1" }, "坏凭据发送", { msgId: "qqevX" });
-  ok(s3.ok === true, "QQ 发送成功（沿用已缓存 token）");
-
-  // 沙箱开关翻转
-  const qqProd = createQqAdapter({ getConfig: () => ({ appId: "a", appSecret: "s", qqSandbox: "0" }), onState: () => {}, onMessage: () => {} });
-  ok(qqProd.status().sandbox === false, "qqSandbox='0' → 生产环境（sandbox=false）");
-
-  await qq2.stop();
-  ok(qq2.status().state === "disconnected", "stop 后 QQ 适配器断开");
-  qqAdapter.dispose();
-  qqProd.dispose();
-
-  // 端到端：经插件注册的 QQ 适配器（index.js）→ 闸门/白名单/agent → 被动回复（msg_id）
-  mockSettingsValue = { ...mockSettingsValue, qqBotAppId: "qq_test_app", qqBotToken: "qq_test_secret" };
+  // 注册表：qq implemented=false + external，不再有自研网关连接
   const resQ = fakeRes();
-  await routes.get("/openclaw-bridge/channels/")(fakeReq("POST", "/openclaw-bridge/channels/qq/login", { body: "{}" }), resQ);
-  ok(resQ.statusCode === 200 && /connected/.test(resQ.body), "插件级 QQ 渠道 login 后 connected");
-  await waitFor(() => qqWsSockets.length >= 1);
-  await sleep(300); // 等插件侧 identify 完成
-  const sentBase2 = qqHttpCalls.filter((x) => x.pathname.startsWith("/v2/")).length;
-  pushQqEvent("GROUP_AT_MESSAGE_CREATE", { id: "qqev_e2e", group_openid: "G1", content: "端到端 QQ 你好", timestamp: Date.now(), author: { user_openid: "U1" }, mentions: [] });
-  await waitFor(() => qqHttpCalls.filter((x) => x.pathname.startsWith("/v2/")).length > sentBase2);
-  const qqReply = qqHttpCalls.filter((x) => x.pathname.startsWith("/v2/")).pop();
-  ok(qqReply && qqReply.body.content.includes("桥接的 DSH agent") && qqReply.body.msg_id === "qqev_e2e", "端到端：QQ 消息 → agent 回合 → 被动回复（带 msg_id）");
-  const resQLog = fakeRes();
-  await routes.get("/openclaw-bridge/channels/")(fakeReq("POST", "/openclaw-bridge/channels/qq/logout", { body: "{}" }), resQLog);
-  mockSettingsValue = { ...mockSettingsValue, qqBotAppId: "", qqBotToken: "" };
+  await routes.get("/openclaw-bridge/channels")(fakeReq("GET", "/openclaw-bridge/channels"), resQ);
+  const dataQ = JSON.parse(resQ.body);
+  const qqRow = dataQ.channels.find((c) => c.id === "qq");
+  ok(qqRow && qqRow.implemented === false && qqRow.enabled === false, "注册表 QQ implemented=false 且未启用（外部接管）");
+  ok(qqRow && /dsh-qqbot/.test(qqRow.eta || ""), "注册表 QQ 占位带官方插件指引");
+
+  // /channels/qq/status → 200 external 占位状态（不再启动自研 WS/HTTP 连接）
+  const resSt = fakeRes();
+  await routes.get("/openclaw-bridge/channels/")(fakeReq("GET", "/openclaw-bridge/channels/qq/status"), resSt);
+  const st = JSON.parse(resSt.body);
+  ok(resSt.statusCode === 200 && st.implemented === false && st.state === "external", "QQ status 返回 external 占位状态");
+
+  // 未装配的渠道不影响微信/飞书（空操作验证：/channels 仍是完整注册表）
+  ok(Array.isArray(dataQ.channels) && dataQ.channels.length === 3, "注册表仍含三渠道行（wechat/feishu/qq 占位）");
 }
 
 // 22) 代码审查修复轮回归（0.7.2）
@@ -1300,15 +1226,6 @@ ok(Array.isArray(inject) && inject.includes("agents"), "inject 含 agents 服务
   const qrEmpty = fakeRes();
   await routes.get("/openclaw-bridge/qr")(fakeReq("GET", "/openclaw-bridge/qr?text="), qrEmpty);
   ok(qrEmpty.statusCode === 400, "QR 路由缺 text 参数 400");
-
-  // ④ QQ token 响应兼容嵌套 data
-  const { pickTokenPayload } = await import("@deepseek-ai/dsh-openclaw-bridge/lib/channels/qq.js");
-  const flatTok = pickTokenPayload({ code: 0, message: "ok", access_token: "a", expires_in: "7200" });
-  const nestedTok = pickTokenPayload({ code: 0, data: { access_token: "b", expires_in: 3600 } });
-  const errTok = pickTokenPayload({ code: 11244, message: "bad" });
-  ok(flatTok.access_token === "a" && flatTok.code === 0, "QQ token 平铺响应解析");
-  ok(nestedTok.access_token === "b" && nestedTok.code === 0, "QQ token 嵌套 data 响应解析");
-  ok(errTok.code === 11244 && !errTok.access_token, "QQ token 错误响应不带 access_token");
 
   // ③ 会话映射持久化（重启续接的存储层）
   const { createSessionMap } = await import("@deepseek-ai/dsh-openclaw-bridge/lib/core/session.js");
