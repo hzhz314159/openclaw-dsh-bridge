@@ -1,32 +1,36 @@
-# openclaw-dsh-bridge · DSH 三通道 IM 桥
+# openclaw-dsh-bridge · DSH IM 桥（微信 + 飞书；QQ 由官方插件提供）
 
-让 **微信 / 飞书 / QQ** 里的消息直接驱动一个运行在 DeepSeek Harness（DSH）里的真实 agent：
+让 **微信 / 飞书** 里的消息直接驱动一个运行在 DeepSeek Harness（DSH）里的真实 agent：
 有工作区文件、能跑命令、跨轮记忆、工具完整——不是只接了个聊天 API 的假机器人。
+**QQ** 自 v0.8.0 起不再由本插件自研实现，改由官方插件
+**@tencent-connect/dsh-qqbot** 独立接入（见下「QQ 由官方插件提供」）。
 
-三通道共用同一套「通道适配器 + DSH 会话映射 + 白名单 + 去重/限流」机制
+本插件内微信 / 飞书共用同一套「通道适配器 + DSH 会话映射 + 白名单 + 去重/限流」机制
 （v0.7.0 起，见 [SPEC.md](SPEC.md)）。
 
 ## 通道总览
 
-| 通道 | 形态 | 连接方式 | 状态 |
+| 通道 | 形态 | 连接方式 | 提供方 |
 | --- | --- | --- | --- |
-| 微信 | 官方 ClawBot / iLink（长轮询） | 设置页扫码绑定 | ✅ |
-| 飞书 | 企业自建应用 + 事件订阅长连接（WebSocket） | 填 AppID/AppSecret/EncryptKey 后连接 | ✅ |
-| QQ | 开放平台机器人（WebSocket 网关） | 填 AppID/Token，缺省沙箱环境 | ✅ |
+| 微信 | 官方 ClawBot / iLink（长轮询） | 设置页扫码绑定 | ✅ 本插件 |
+| 飞书 | 企业自建应用 + 事件订阅长连接（WebSocket） | 填 AppID/AppSecret/EncryptKey 后连接 | ✅ 本插件 |
+| QQ | 开放平台机器人（WebSocket 网关） | 安装官方 `@tencent-connect/dsh-qqbot` | ✅ 官方插件 |
 
-三条通道均走**官方接口**，仓库内不含任何逆向协议/hook 代码；不需要公网 IP、
-端口映射或内网穿透（微信/飞书是出站长连接，QQ 是网关长连接）。
+通道均走**官方接口**，仓库内不含任何逆向协议/hook 代码；不需要公网 IP、
+端口映射或内网穿透（微信/飞书是出站长连接；QQ 网关长连接由官方插件负责）。
 
 ## 架构
 
 ```
 微信 iLink 云 ──┐
 飞书长连接云 ──┼──► 本插件（DSH webServer 内 Cordis 插件）
-QQ 开放平台网关 ─┘          │  agents.create + agent.followup + session 事件流
-                           ▼
-                 DSH Agent 会话（每会话 / 每群一个，独立工作区）
-                           │
-               回复自动发回原 IM（分段 ≤1500 字符，总量 ≤4000）
+               │  agents.create + agent.followup + session 事件流
+               ▼
+     DSH Agent 会话（每会话 / 每群一个，独立工作区）
+               │
+   回复自动发回原 IM（分段 ≤1500 字符，总量 ≤4000）
+
+QQ（@tencent-connect/dsh-qqbot）──► 独立 Cordis 插件 → 各自 DSH 会话
 ```
 
 同时保留 v0.6 的 OpenAI 兼容端点（`POST /openclaw-bridge/v1/chat/completions`），
@@ -34,8 +38,11 @@ QQ 开放平台网关 ─┘          │  agents.create + agent.followup + sess
 
 ## 特性
 
-- **三通道统一 IM 桥**：微信 / 飞书 / QQ 各自成卡（设置 → IM 桥接），
-  每通道独立开关、独立白名单、独立状态；`GET /openclaw-bridge/channels` 返回注册表。
+- **双通道统一 IM 桥**：微信 / 飞书 各自成卡（设置 → IM 桥接），
+  每通道独立开关、独立白名单、独立状态；`GET /openclaw-bridge/channels` 返回注册表
+  （QQ 卡为外部提供方占位，`implemented=false`，指向官方插件）。
+- **QQ 由官方插件提供（v0.8.0 起）**：QQ 通道不再由本插件自研实现，
+  改由官方 `@tencent-connect/dsh-qqbot` 独立装配（见下方安装指引）。
 - **会话映射**：私聊每用户一会话；群聊每群一会话（成员@机器人触发、回复进群、
   发言带 `[群友 用户名]` 署名，可用 `groupSignature=0` 关闭）。
 - **会话续接（v0.7.2 起）**：IM 会话 id 持久化到 `~/.dsh/openclaw-bridge/session-map.json`，
@@ -78,7 +85,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1
 
 ### 2. 设置页「IM 桥接」
 
-重启 DSH Desktop 后，打开 **设置 → IM 桥接**，三张通道卡各自配置：
+重启 DSH Desktop 后，打开 **设置 → IM 桥接**，微信 / 飞书的通道卡各自配置：
 
 通用区（沿用原 ClawBot 栏）：
 
@@ -104,13 +111,24 @@ powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1
    点 **保存**，再点 **连接**；卡片「连接测试」可先校验凭据；
 4. 私聊机器人直接发消息；群聊需把机器人拉进群、@它触发。
 
-#### QQ（开放平台机器人）
+#### QQ（由官方 @tencent-connect/dsh-qqbot 提供）
 
-1. QQ 开放平台（q.qq.com）创建机器人，拿到 **AppID / 机器人 Token**；
-2. 卡片填入凭据，`沙箱环境` 默认开启 —— 沙箱内仅测试频道/成员可见；
-3. 点 **连接**，状态 **已连接** 后在测试频道 @机器人 或私聊它；
-4. 功能验证通过后在开放平台提交 **发布审核**，审核通过后关闭沙箱
-   （`qqSandbox=0` 切生产环境）。
+QQ 开放平台机器人在 v0.8.0 起由**官方独立插件**
+[@tencent-connect/dsh-qqbot](https://github.com/tencent-connect/dsh-qqbot) 接入，
+本插件（以及其设置卡）不再参与 QQ 协议：
+
+1. 安装官方插件：`npx @deepseek-ai/dsh plugin add @tencent-connect/dsh-qqbot`
+   （或把包放入 profile 的 `dsh.profile.bundles`——它是官方 bundle，自带
+   `dsh.bundle.patch`，属合法 bundle 层装配），重启 DSH Desktop；
+2. 凭据二选一：
+   - 环境变量 **QQBOT_APPID** / **QQBOT_SECRET**；或
+   - 首次运行在插件日志/终端出现授权码时 **扫码绑定**（qqbot-connector 终端扫码）；
+3. 其自带的 `/new` `/compact`、`requireMention`、`access.c2cMode/groupMode`
+   等配置详见官方插件 README；私聊/群聊 @ 机器人即触发回复。
+
+> 若之前在旧版本插件配置过 QQ 凭据（`qqBotAppId/qqBotToken/qqSandbox`），
+> 那些字段已随 v0.8.0 从设置 schema 移除，可留在旧 settings.yaml 中不清理，
+> 不再被读取。
 
 ### 3. 三条通道共用的指令
 
@@ -123,9 +141,10 @@ powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1
 
 ### 4. 白名单（强烈建议）
 
-每个通道卡都有独立白名单（如微信 `xxx@im.wechat`、飞书 `ou_xxx`、QQ `openid`，
+每个通道卡都有独立白名单（如微信 `xxx@im.wechat`、飞书 `ou_xxx`，
 用 `/list` 或通道日志可看到自己的 id）。白名单外的消息被静默忽略——
 IM 驱动的是你 PC 上真实的 agent（完整文件/命令能力），务必只放行自己。
+（QQ 的白名单由官方 dsh-qqbot 的 `access` 配置管理。）
 
 ## 平台硬约束（官方条款）
 
@@ -133,8 +152,8 @@ IM 驱动的是你 PC 上真实的 agent（完整文件/命令能力），务必
   （含回复）—— 适合应答式助手，不适合主动轰炸。
 - **飞书**：企业自建应用，消息权限按应用审核分配（`im:message`、p2p / group_at）；
   长连接模式心跳由平台协商。
-- **QQ**：被动回复有 2 分钟窗口（携带 `msg_id`）；沙箱→发布审核制；
-  主动消息频控数值以开放平台开发者文档为准（实现侧只做被动回复，不占用主动额度）。
+- **QQ**：由官方 dsh-qqbot 处理；被动回复 2 分钟窗口（携带 `msg_id`）、
+  沙箱→发布审核制等条款见官方插件与开放平台文档。
 - 本插件**只做被动回复**：收到消息 → agent 一轮 → 回复发出，不发起主动消息。
 
 ## 协议端点
@@ -148,7 +167,7 @@ IM 驱动的是你 PC 上真实的 agent（完整文件/命令能力），务必
 | 路由 | 说明 |
 | --- | --- |
 | `GET /openclaw-bridge/channels` | 渠道注册表（implemented/enabled/status） |
-| `POST /openclaw-bridge/channels/<id>/login` | 连接通道（wechat/feishu/qq） |
+| `POST /openclaw-bridge/channels/<id>/login` | 连接通道（wechat/feishu；qq 返回 external 占位） |
 | `POST /openclaw-bridge/channels/<id>/verify` | 提交配对码（仅微信） |
 | `POST /openclaw-bridge/channels/<id>/logout` | 断开通道 |
 | `GET /openclaw-bridge/wechat/status` 等 | 旧微信别名路由（保留） |
@@ -159,16 +178,17 @@ IM 驱动的是你 PC 上真实的 agent（完整文件/命令能力），务必
   `x-openclaw-bridge-token`；token 来源：环境变量 `OPENCLAW_BRIDGE_TOKEN`，
   未设置时首次启动自动生成到 `~/.dsh/openclaw-bridge/token.txt`；
 - 入站去重（`channel:eventId`，LRU 5 万）+ 入站限流（20 条/用户/分钟）；
-- 凭据（飞书 AppSecret/EncryptKey、QQ Token）保存时不回显；
+- 凭据（飞书 AppSecret/EncryptKey）保存时不回显；
 - 回复整编：单段 ≤1500 字符、总量 ≤4000，超长截断并提示；
 - 桥接后的 agent 拥有 DSH 全部工具能力（文件、命令、网络）——
   默认隔离工作区，谨慎决定谁能与机器人对话。
 
 ## 合规说明
 
-- 三通道均为**官方接口**：微信 ClawBot/iLink、飞书开放平台（企业自建应用）、
-  QQ 开放平台机器人；仓库不含任何逆向协议/hook 代码；
-- QQ 属开放平台审核制：沙箱阶段仅测试成员可见；发布需遵循平台审核与内容规范；
+- 微信、飞书均为**官方接口**：微信 ClawBot/iLink、飞书开放平台（企业自建应用）；
+  QQ 由官方插件 `@tencent-connect/dsh-qqbot` 接入，同样走官方开放平台接口；
+  本仓库不含任何逆向协议/hook 代码（`docs/qq-bot-dsh-report.md` 为 v0.8.0 之前
+  自研实现的协议调研存档，仅供了解，不再被本插件使用）；
 - 插件本体 MIT 许可证；依赖的 DSH 核心包（`@deepseek-ai/*`）均为 MIT；
 - 与腾讯、字节（飞书）、DeepSeek 均无隶属关系；
 - 使用者自行承担账号风险与数据处理义务；对外托管需自行满足
@@ -178,7 +198,8 @@ IM 驱动的是你 PC 上真实的 agent（完整文件/命令能力），务必
 
 - [docs/wechat-clawbot-doc-note.md](docs/wechat-clawbot-doc-note.md) —— 微信 Clawbot 平台接口核对
 - [docs/feishu-bot-dsh-report.md](docs/feishu-bot-dsh-report.md) —— 飞书长连接协议（对照官方 SDK）
-- [docs/qq-bot-dsh-report.md](docs/qq-bot-dsh-report.md) —— QQ 开放平台协议（对照官方 botgo SDK）
+- [docs/qq-bot-dsh-report.md](docs/qq-bot-dsh-report.md) —— QQ 开放平台协议调研存档
+  （v0.8.0 起 QQ 由官方 `@tencent-connect/dsh-qqbot` 提供，本文档仅作历史参考）
 
 ## 更新与卸载
 
@@ -202,9 +223,9 @@ powershell -ExecutionPolicy Bypass -File .\scripts\uninstall.ps1
 ## 测试
 
 ```powershell
-# 单元测试（137 项断言：协议 11 + 微信 21 + 自定义端点 11 + 共享层 15 +
-# 注册表/迁移 + ws 6 + 飞书 20 + QQ 24；mock DSH 核心服务 + mock 三朵云 +
-# mock 网关长连接，全部本地端口）
+# 单元测试（138 项断言：协议 11 + 微信 21 + 自定义端点 11 + 共享层 15 +
+# 注册表/迁移 + ws 6 + 飞书 20 + 外部托管占位 4；mock DSH 核心服务 + mock 微信/飞书云 +
+# mock 网关长连接，全部本地端口；自研 QQ 协议断言已随 v0.8.0 移除）
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\test.ps1
 
 # 集成测试：克隆 DSH home、起一个真实的 dsh web 实例（独立端口），
@@ -219,7 +240,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\integration-test.p
 
 ```bash
 node --check lib/index.js          # 语法检查（无构建步骤）
-node --check lib/channels/qq.js    # 各通道同理
+node --check lib/channels/wechat.js
+node --check lib/channels/feishu.js
 ```
 
 插件是纯 ESM、零构建；运行时只依赖 node 内置模块与 DSH 核心包
